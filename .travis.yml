@@ -1,25 +1,59 @@
-language: objective-c
-xcode_workspace: Carthage.xcworkspace
-xcode_scheme: carthage
-osx_image: xcode611
-before_install: true
 install: true
 git:
   submodules: false
-script: BUILD_TOOL=xctool script/cibuild
+cache:
+  directories:
+    - .build/checkouts # SwiftPM
+    - .build/repositories # SwiftPM
+branches:
+  only:
+    - master
+matrix:
+  include:
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script: make test
+      env: JOB=CI_BUILD_TEST
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script: make package
+      env: JOB=CI_BUILD_PACKAGE
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script:
+        - make swiftpm
+        - .build/release/carthage version
+      env: JOB=CI_BUILD_SWIFTPM
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script:
+        - make swiftpm_test
+      env: JOB=CI_BUILD_SWIFTPM_TEST
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script:
+        - brew uninstall carthage
+        - HOMEBREW_NO_AUTO_UPDATE=1 brew install bats
+        - make install
+        - bats IntegrationTests
+      env:
+        - JOB=INTEGRATION_TESTS
+    - os: osx
+      language: objective-c
+      osx_image: xcode9
+      script:
+        - brew uninstall carthage
+        - HOMEBREW_NO_AUTO_UPDATE=1 brew install bats        
+        - make swiftpm_install
+        - bats IntegrationTests
+      env:
+        - JOB=INTEGRATION_TESTS_SWIFTPM
 notifications:
   email: false
   slack:
     secure: lblNhCx6581hiPskQQnH663QY/HHqs6y8rMCLIff1Ryq0ngBaTwBJZ6E5tAR8oWTGWg3nMAAm/AaJPQGFC9jnKxtpWJhuEF58RY+EBe1Rz3gjKmacvEZS+PW+k3cRrRPZr6Vh6D8d0cb1gfM7BvGZar21ipBC/WcnNden3LxZ+0=
-env:
-  global:
-    secure: DofNs+Ej7JblkkGMTHOl4XMBfv0EKVvzZU7OOm7U6Hyxu0J0SN6E3s61Q4HUWOBvM3Yrxf+8jpFKI29w69WArmRPpmK6GCaZar8ldUBHNmN3gaeOaGmGyrmnre4hxHjJzc0E3HAmJ03v94HW5JwQzKpIUjxg4dSttJMT6WOmnxE=
-deploy:
-  provider: releases
-  api-key:
-    secure: c1fMI4p8oUVGi7SkDLqXpZDhrVVnLWU8J6+rWc3pTMmeNmEGopZpCiiQupHoHXx+Fq3+8R4M2iG0IgfcVTb6q5HD2RH0+q57/p9vcYIlCS8E/1o2BPUHUfH1Poc1vs7VdFpjWFmbm6Twnnffbz3AsELjv3mJyRxR6fUAliwfnWk=
-  file: Carthage.pkg
-  skip_cleanup: true
-  on:
-    tags: true
-    all_branches: true

@@ -1,64 +1,125 @@
-//
-//  Update.swift
-//  Carthage
-//
-//  Created by Justin Spahr-Summers on 2014-11-12.
-//  Copyright (c) 2014 Carthage. All rights reserved.
-//
-
 import CarthageKit
 import Commandant
 import Foundation
-import LlamaKit
-import ReactiveCocoa
+import Result
+import ReactiveSwift
+import Curry
 
-public struct UpdateCommand: CommandType {
-	public let verb = "update"
-	public let function = "Update and rebuild the project's dependencies"
+/// Type that encapsulates the configuration and evaluation of the `update` subcommand.
+public struct UpdateCommand: CommandProtocol {
+	public struct Options: OptionsProtocol {
+		public let checkoutAfterUpdate: Bool
+		public let buildAfterUpdate: Bool
+		public let isVerbose: Bool
+		public let logPath: String?
+		public let buildOptions: CarthageKit.BuildOptions
+		public let checkoutOptions: CheckoutCommand.Options
+		public let dependenciesToUpdate: [String]?
 
-	public func run(mode: CommandMode) -> Result<()> {
-		return ColdSignal.fromResult(UpdateOptions.evaluate(mode))
-			.map { options -> ColdSignal<()> in
-				return options.checkoutOptions.loadProject()
-					.map { $0.updateDependencies() }
-					.merge(identity)
-					.then(options.buildSignal)
+		/// The build options corresponding to these options.
+		public var buildCommandOptions: BuildCommand.Options {
+			return BuildCommand.Options(
+				buildOptions: buildOptions,
+				skipCurrent: true,
+				colorOptions: checkoutOptions.colorOptions,
+				isVerbose: isVerbose,
+				directoryPath: checkoutOptions.directoryPath,
+				logPath: logPath,
+				dependenciesToBuild: dependenciesToUpdate
+			)
+		}
+
+		/// If `checkoutAfterUpdate` and `buildAfterUpdate` are both true, this will
+		/// be a producer representing the work necessary to build the project.
+		///
+		/// Otherwise, this producer will be empty.
+		public var buildProducer: SignalProducer<(), CarthageError> {
+			if checkoutAfterUpdate && buildAfterUpdate {
+				return BuildCommand().buildWithOptions(buildCommandOptions)
+			} else {
+				return .empty
 			}
-			.merge(identity)
-			.wait()
-	}
-}
+		}
 
-public struct UpdateOptions: OptionsType {
-	public let buildAfterUpdate: Bool
-	public let configuration: String
-	public let checkoutOptions: CheckoutOptions
+		private init(checkoutAfterUpdate: Bool,
+		             buildAfterUpdate: Bool,
+		             isVerbose: Bool,
+		             logPath: String?,
+		             buildOptions: BuildOptions,
+		             checkoutOptions: CheckoutCommand.Options
+		) {
+			self.checkoutAfterUpdate = checkoutAfterUpdate
+			self.buildAfterUpdate = buildAfterUpdate
+			self.isVerbose = isVerbose
+			self.logPath = logPath
+			self.buildOptions = buildOptions
+			self.checkoutOptions = checkoutOptions
+			self.dependenciesToUpdate = checkoutOptions.dependenciesToCheckout
+		}
 
-	/// The build options corresponding to these options.
-	public var buildOptions: BuildOptions {
-		return BuildOptions(configuration: configuration, skipCurrent: true, directoryPath: checkoutOptions.directoryPath)
-	}
+		public static func evaluate(_ mode: CommandMode) -> Result<Options, CommandantError<CarthageError>> {
+			let buildDescription = "skip the building of dependencies after updating\n(ignored if --no-checkout option is present)"
 
-	/// If `buildAfterUpdate` is true, this will be a signal representing the
-	/// work necessary to build the project.
-	///
-	/// Otherwise, this signal will be empty.
-	public var buildSignal: ColdSignal<()> {
-		if buildAfterUpdate {
-			return BuildCommand().buildWithOptions(buildOptions)
-		} else {
-			return .empty()
+			let binariesAddendum = "\n(ignored if --no-build or --toolchain option is present)"
+			let dependenciesUsage = "the dependency names to update, checkout and build"
+
+			return curry(self.init)
+				<*> mode <| Option(key: "checkout", defaultValue: true, usage: "skip the checking out of dependencies after updating")
+				<*> mode <| Option(key: "build", defaultValue: true, usage: buildDescription)
+				<*> mode <| Option(key: "verbose", defaultValue: false, usage: "print xcodebuild output inline (ignored if --no-build option is present)")
+				<*> mode <| Option(key: "log-path", defaultValue: nil, usage: "path to the xcode build output. A temporary file is used by default")
+				<*> BuildOptions.evaluate(mode, addendum: "\n(ignored if --no-build option is present)")
+				<*> CheckoutCommand.Options.evaluate(mode, useBinariesAddendum: binariesAddendum, dependenciesUsage: dependenciesUsage)
+		}
+
+		/// Attempts to load the project referenced by the options, and configure it
+		/// accordingly.
+		public func loadProject() -> SignalProducer<Project, CarthageError> {
+			return checkoutOptions.loadProject()
+				.on(value: { project in
+					// Never check out binaries if 
+					// 1. we're skipping the build step, or
+					// 2. `--toolchain` option is given
+					// because that means users may need the repository checkout.
+					if !self.buildAfterUpdate || self.buildOptions.toolchain != nil {
+						project.useBinaries = false
+					}
+				})
 		}
 	}
 
-	public static func create(configuration: String)(buildAfterUpdate: Bool)(checkoutOptions: CheckoutOptions) -> UpdateOptions {
-		return self(buildAfterUpdate: buildAfterUpdate, configuration: configuration, checkoutOptions: checkoutOptions)
-	}
+	public let verb = "update"
+	public let function = "Update and rebuild the project's dependencies"
 
-	public static func evaluate(m: CommandMode) -> Result<UpdateOptions> {
-		return create
-			<*> m <| Option(key: "configuration", defaultValue: "Release", usage: "the Xcode configuration to build (ignored if --no-build option is present)")
-			<*> m <| Option(key: "build", defaultValue: true, usage: "skip the building of dependencies after updating")
-			<*> CheckoutOptions.evaluate(m)
+	public func run(_ options: Options) -> Result<(), CarthageError> {
+		return options.loadProject()
+			.flatMap(.merge) { project -> SignalProducer<(), CarthageError> in
+
+				let checkDependencies: SignalProducer<(), CarthageError>
+				if let depsToUpdate = options.dependenciesToUpdate {
+					checkDependencies = project
+						.loadCombinedCartfile()
+						.flatMap(.concat) { cartfile -> SignalProducer<(), CarthageError> in
+							let dependencyNames = cartfile.dependencies.keys.map { $0.name.lowercased() }
+							let unknownDependencyNames = Set(depsToUpdate.map { $0.lowercased() }).subtracting(dependencyNames)
+
+							if !unknownDependencyNames.isEmpty {
+								return SignalProducer(error: .unknownDependencies(unknownDependencyNames.sorted()))
+							}
+							return .empty
+						}
+				} else {
+					checkDependencies = .empty
+				}
+
+				let updateDependencies = project.updateDependencies(
+					shouldCheckout: options.checkoutAfterUpdate, buildOptions: options.buildOptions,
+					dependenciesToUpdate: options.dependenciesToUpdate
+				)
+
+				return checkDependencies.then(updateDependencies)
+			}
+			.then(options.buildProducer)
+			.waitOnCommand()
 	}
 }

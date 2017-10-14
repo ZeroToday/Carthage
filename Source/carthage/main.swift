@@ -1,30 +1,39 @@
-//
-//  main.swift
-//  Carthage
-//
-//  Created by Justin Spahr-Summers on 2014-10-10.
-//  Copyright (c) 2014 Carthage. All rights reserved.
-//
-
 import CarthageKit
 import Commandant
 import Foundation
-import LlamaKit
+import ReactiveSwift
 import ReactiveTask
+import Result
 
-let registry = CommandRegistry()
+setlinebuf(stdout)
+
+guard ensureGitVersion().first()?.value == true else {
+	fputs("Carthage requires git \(carthageRequiredGitVersion) or later.\n", stderr)
+	exit(EXIT_FAILURE)
+}
+
+if let remoteVersion = remoteVersion(), CarthageKitVersion.current.value < remoteVersion {
+	fputs("Please update to the latest Carthage version: \(remoteVersion). You currently are on \(CarthageKitVersion.current.value)" + "\n", stderr)
+}
+
+if let carthagePath = Bundle.main.executablePath {
+	setenv("CARTHAGE_PATH", carthagePath, 0)
+}
+
+let registry = CommandRegistry<CarthageError>()
+registry.register(ArchiveCommand())
 registry.register(BootstrapCommand())
 registry.register(BuildCommand())
 registry.register(CheckoutCommand())
 registry.register(CopyFrameworksCommand())
 registry.register(FetchCommand())
+registry.register(OutdatedCommand())
 registry.register(UpdateCommand())
 registry.register(VersionCommand())
 
 let helpCommand = HelpCommand(registry: registry)
 registry.register(helpCommand)
 
-registry.main(defaultCommand: helpCommand) { error in
-	let errorDescription = (error.domain == CarthageErrorDomain || error.domain == CommandantErrorDomain || error.domain == ReactiveTaskError.domain ? error.localizedDescription : error.description)
-	fputs("\(errorDescription)\n", stderr)
+registry.main(defaultVerb: helpCommand.verb) { error in
+	fputs(error.description + "\n", stderr)
 }
